@@ -42,41 +42,91 @@ import (
 // rate; a server usually answers it with 408 Request Timeout.
 var ErrBodyTooSlow = errors.New("request body arrived too slowly")
 
-// MinimumProgress is the progress a client must make.
-type MinimumProgress struct {
+const (
+	// DefaultBodyWindow is how long a request body may take to deliver
+	// DefaultBodyBytes when MiddlewareArgs.BodyWindow is zero.
+	DefaultBodyWindow = 10 * time.Second
+	// DefaultBodyBytes is the bytes a request body must deliver in each body
+	// window, 64 KiB, about 6.5 KB/s at the default window, when
+	// MiddlewareArgs.BodyBytes is zero or negative.
+	DefaultBodyBytes = 64 << 10
+	// DefaultWriteWindow is how long one response write may wait for the
+	// client to read when MiddlewareArgs.WriteWindow is zero.
+	DefaultWriteWindow = 30 * time.Second
+)
+
+// MiddlewareArgs is the progress Middleware asks of every client. Nil and
+// the zero value ask for the defaults.
+type MiddlewareArgs struct {
 	// BodyWindow is how long a request body may take to deliver BodyBytes
-	// more bytes; each BodyBytes received starts a new window.
+	// more bytes; each BodyBytes received starts a new window. Zero uses
+	// DefaultBodyWindow; negative sets no read deadline.
 	BodyWindow time.Duration
-	BodyBytes  int64
+	// BodyBytes is the bytes a request body must deliver in each window.
+	// Zero or negative uses DefaultBodyBytes.
+	BodyBytes int64
 	// WriteWindow is how long one write of a response may wait for the
-	// client to read.
+	// client to read. Zero uses DefaultWriteWindow; negative sets no write
+	// deadline.
 	WriteWindow time.Duration
 }
 
-// DefaultMinimumProgress asks for 64 KiB of body every 10 seconds, about
-// 6.5 KB/s, and for each response write to leave within 30 seconds.
-func DefaultMinimumProgress() MinimumProgress {
-	return MinimumProgress{
-		BodyWindow:  10 * time.Second,
-		BodyBytes:   64 << 10,
-		WriteWindow: 30 * time.Second,
-	}
+// minimumProgress is the progress Middleware asks for, with the defaults
+// applied; a zero window sets no deadline in that direction.
+type minimumProgress struct {
+	bodyWindow  time.Duration
+	bodyBytes   int64
+	writeWindow time.Duration
 }
 
-// Middleware applies progress to every request: its body must keep the
-// minimum rate, and each response write must leave within the write window.
-// A zero window sets no deadline in that direction. Once the handler returns,
-// it sends whatever the server still buffers under the write deadline.
-func Middleware(progress MinimumProgress) func(http.Handler) http.Handler {
+// newMinimumProgress applies the defaults to args, which may be nil.
+func newMinimumProgress(args *MiddlewareArgs) minimumProgress {
+	if args == nil {
+		args = &MiddlewareArgs{}
+	}
+	progress := minimumProgress{
+		bodyWindow:  window(args.BodyWindow, DefaultBodyWindow),
+		bodyBytes:   args.BodyBytes,
+		writeWindow: window(args.WriteWindow, DefaultWriteWindow),
+	}
+	if progress.bodyBytes <= 0 {
+		progress.bodyBytes = DefaultBodyBytes
+	}
+	return progress
+}
+
+// window is configured, fallback when configured is zero, or zero, meaning
+// no deadline, when configured is negative.
+func window(configured, fallback time.Duration) time.Duration {
+	switch {
+	case configured == 0:
+		return fallback
+	case configured < 0:
+		return 0
+	}
+	return configured
+}
+
+// Middleware asks every request for the progress args describe, which may
+// be nil for the defaults: its body must keep the minimum rate, and each
+// response write must leave within the write window. Once the handler
+// returns, it sends whatever the server still buffers under the write
+// deadline.
+func Middleware(args *MiddlewareArgs) func(http.Handler) http.Handler {
+	return middleware(newMinimumProgress(args), time.Now)
+}
+
+// middleware is Middleware with the clock it arms deadlines from.
+func middleware(progress minimumProgress, now func() time.Time) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			current := &transfer{
 				control:  http.NewResponseController(w),
 				progress: progress,
 				http1:    req.ProtoMajor == 1,
+				now:      now,
 			}
-			if progress.BodyWindow > 0 && progress.BodyBytes > 0 && req.Body != nil &&
-				req.Body != http.NoBody {
+			if progress.bodyWindow > 0 && req.Body != nil && req.Body != http.NoBody {
 				current.body = &deadlineBody{body: req.Body, transfer: current}
 				req = req.WithContext(req.Context())
 				req.Body = current.body
@@ -95,9 +145,11 @@ func Middleware(progress MinimumProgress) func(http.Handler) http.Handler {
 // full-duplex HTTP/1.1, so neither clears the other's.
 type transfer struct {
 	control  *http.ResponseController
-	progress MinimumProgress
+	progress minimumProgress
 	http1    bool
 	body     *deadlineBody
+	// now is the clock deadlines are armed from: time.Now, or a test's.
+	now func() time.Time
 
 	mutex sync.Mutex
 	// reading is set while a body read is blocked, writerHoldsRead while a
@@ -135,10 +187,10 @@ func (b *deadlineBody) Read(target []byte) (int, error) {
 		return 0, b.tooSlow
 	}
 	progress := b.transfer.progress
-	now := time.Now()
+	now := b.transfer.now()
 	switch {
 	case b.windowEnd.IsZero():
-		b.windowEnd = now.Add(progress.BodyWindow)
+		b.windowEnd = now.Add(progress.bodyWindow)
 	case now.After(b.lastReturn):
 		b.windowEnd = b.windowEnd.Add(now.Sub(b.lastReturn))
 	}
@@ -149,7 +201,7 @@ func (b *deadlineBody) Read(target []byte) (int, error) {
 	current.mutex.Unlock()
 
 	n, err := b.body.Read(target)
-	b.lastReturn = time.Now()
+	b.lastReturn = current.now()
 
 	current.mutex.Lock()
 	current.reading = false
@@ -170,16 +222,16 @@ func (b *deadlineBody) Read(target []byte) (int, error) {
 	current.mutex.Unlock()
 
 	b.windowBytes += int64(n)
-	if b.windowBytes >= progress.BodyBytes {
+	if b.windowBytes >= progress.bodyBytes {
 		b.windowBytes = 0
-		b.windowEnd = b.lastReturn.Add(progress.BodyWindow)
+		b.windowEnd = b.lastReturn.Add(progress.bodyWindow)
 	}
 	if tooSlow {
 		b.tooSlow = fmt.Errorf(
 			"%w: under %d bytes in %s: %w",
 			ErrBodyTooSlow,
-			progress.BodyBytes,
-			progress.BodyWindow,
+			progress.bodyBytes,
+			progress.bodyWindow,
 			err,
 		)
 		return n, b.tooSlow
@@ -193,8 +245,9 @@ func (b *deadlineBody) Close() error {
 	current := b.transfer
 	current.mutex.Lock()
 	deadlineSet := false
-	if !current.bodyFinished && current.progress.BodyWindow > 0 {
-		deadlineSet = current.control.SetReadDeadline(time.Now().Add(current.progress.BodyWindow)) == nil
+	if !current.bodyFinished && current.progress.bodyWindow > 0 {
+		closeDeadline := current.now().Add(current.progress.bodyWindow)
+		deadlineSet = current.control.SetReadDeadline(closeDeadline) == nil
 		current.closing = deadlineSet
 	}
 	current.mutex.Unlock()
@@ -225,12 +278,13 @@ func (w *deadlineWriter) setDeadlines() func() {
 	progress := current.progress
 	current.mutex.Lock()
 	defer current.mutex.Unlock()
-	now := time.Now()
-	writeSet := progress.WriteWindow > 0 &&
-		current.control.SetWriteDeadline(now.Add(progress.WriteWindow)) == nil
+	now := current.now()
+	writeSet := progress.writeWindow > 0 &&
+		current.control.SetWriteDeadline(now.Add(progress.writeWindow)) == nil
 	readSet := false
-	if current.http1 && !current.bodyFinished && !current.reading && !current.closing && progress.BodyWindow > 0 {
-		readSet = current.control.SetReadDeadline(now.Add(progress.BodyWindow)) == nil
+	if current.http1 && !current.bodyFinished && !current.reading && !current.closing &&
+		progress.bodyWindow > 0 {
+		readSet = current.control.SetReadDeadline(now.Add(progress.bodyWindow)) == nil
 		current.writerHoldsRead = readSet
 	}
 	return func() {
@@ -299,12 +353,12 @@ func (w *deadlineWriter) finish() {
 		current.mutex.Unlock()
 		return
 	}
-	now := time.Now()
-	if progress.WriteWindow > 0 {
-		_ = current.control.SetWriteDeadline(now.Add(progress.WriteWindow))
+	now := current.now()
+	if progress.writeWindow > 0 {
+		_ = current.control.SetWriteDeadline(now.Add(progress.writeWindow))
 	}
-	if !current.bodyFinished && progress.BodyWindow > 0 {
-		_ = current.control.SetReadDeadline(now.Add(progress.BodyWindow))
+	if !current.bodyFinished && progress.bodyWindow > 0 {
+		_ = current.control.SetReadDeadline(now.Add(progress.bodyWindow))
 	}
 	current.mutex.Unlock()
 	_ = current.control.Flush()

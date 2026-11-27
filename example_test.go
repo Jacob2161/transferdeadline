@@ -22,7 +22,7 @@ func ExampleMiddleware() {
 	})
 	server := &http.Server{
 		Addr:    "localhost:8080",
-		Handler: transferdeadline.Middleware(transferdeadline.DefaultMinimumProgress())(upload),
+		Handler: transferdeadline.Middleware(nil)(upload),
 	}
 	_ = server // server.ListenAndServe()
 }
