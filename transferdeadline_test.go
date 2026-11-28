@@ -1,7 +1,8 @@
 package transferdeadline
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"io"
 	"net"
@@ -133,8 +134,11 @@ func TestWorkAfterTheBodyPreservesTheRequest(t *testing.T) {
 				t,
 				protocol,
 				func(w http.ResponseWriter, req *http.Request) {
-					var request struct{ Name string }
-					if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+					var request struct {
+						Name string `json:"name"`
+					}
+					decoder := jsontext.NewDecoder(req.Body)
+					if err := json.UnmarshalDecode(decoder, &request); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
