@@ -25,13 +25,13 @@ jobs:
             exit 1
           fi
       - run: go mod tidy -diff
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+      - run: go tool -modfile=tools/go.mod govulncheck ./...
 
   test:
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.26.x', '1.27.x']
+        go: ['1.27.x']
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -40,5 +40,5 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
       - run: go vet ./...
-      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - run: go tool -modfile=tools/go.mod staticcheck ./...
       - run: go test -race ./...

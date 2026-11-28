@@ -3,7 +3,14 @@
 This module follows semantic versioning. Before v1, a minor version may
 change the API; each such change says what callers must do.
 
-## Unreleased
+## v0.3.0 (2026-11-28)
+
+- Requires Go 1.27, the newest Go release; Go 1.26 is no longer
+  supported.
+- CI runs staticcheck and govulncheck at the versions pinned in
+  `tools/go.mod`, a module of its own that importers never see.
+
+## v0.2.0 (2026-11-27)
 
 This is a breaking change and ships as v0.2.0.
 
