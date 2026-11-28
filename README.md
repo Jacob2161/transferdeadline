@@ -32,4 +32,4 @@ if _, err := io.Copy(file, req.Body); errors.Is(err, transferdeadline.ErrBodyToo
 - Its writer supports `http.Flusher` (with `FlushError`), `http.Hijacker`, and `Unwrap`. Middleware
   outside it that wraps the ResponseWriter must implement `Unwrap() http.ResponseWriter` too.
 
-Tested on the two newest Go releases. Licensed under the MIT license.
+Requires Go 1.27. Licensed under the MIT license.

@@ -3,6 +3,12 @@
 This module follows semantic versioning. Before v1, a minor version may
 change the API; each such change says what callers must do.
 
+## v0.3.1 (2026-11-28)
+
+- CI runs every step in bash, so the Windows runners read
+  `-modfile=tools/go.mod` whole. No API change.
+- The README says the module requires Go 1.27.
+
 ## v0.3.0 (2026-11-28)
 
 - Requires Go 1.27, the newest Go release; Go 1.26 is no longer
