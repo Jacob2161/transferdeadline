@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# Windows runners default to PowerShell, which splits -modfile=tools/go.mod
+# at the dot.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   checks:
     runs-on: ubuntu-latest
